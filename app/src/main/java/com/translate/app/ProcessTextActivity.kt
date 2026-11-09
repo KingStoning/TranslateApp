@@ -5,6 +5,7 @@ import android.content.ClipboardManager
 import android.content.Intent
 import android.os.Bundle
 import android.view.WindowManager
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.animation.*
@@ -24,6 +25,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.text.HtmlCompat
 import com.translate.app.data.CredentialManager
 import com.translate.app.data.api.ApiClient
 import com.translate.app.data.model.TranslationResult
@@ -37,13 +39,19 @@ import kotlinx.coroutines.*
  * 不需要 SYSTEM_ALERT_WINDOW 权限，不会崩溃。
  *
  * 工作方式：
- * 1. 接收文本（来自 PROCESS_TEXT 或悬浮球服务）
+ * 1. 接收文本，入口有三种：
+ *    - ACTION_PROCESS_TEXT：选中文字 → 工具栏 / 「更多 ⋮」里的「翻译」
+ *    - ACTION_SEND：选中文字 → 「分享」，或 App 的「更多 → 分享/发送」→ 选「翻译」
+ *    - 悬浮球服务（同样通过 EXTRA_PROCESS_TEXT 传入）
  * 2. 在 Compose UI 中直接显示加载 → 翻译结果
  * 3. 用户点击空白处或 ✕ 按钮手动关闭（不会自动消失）
  */
 class ProcessTextActivity : ComponentActivity() {
 
     private val scope = CoroutineScope(Dispatchers.Main + SupervisorJob())
+
+    /** 当前要翻译的文本；onNewIntent 时更新，Compose 会自动重新翻译 */
+    private var currentText by mutableStateOf("")
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -58,14 +66,16 @@ class ProcessTextActivity : ComponentActivity() {
 
         val text = extractText(intent)
         if (text.isNullOrBlank()) {
+            Toast.makeText(this, R.string.no_text_selected, Toast.LENGTH_SHORT).show()
             finish()
             return
         }
+        currentText = text
 
         setContent {
             TranslateAppTheme(dynamicColor = false) {
                 TranslationPopup(
-                    text = text,
+                    text = currentText,
                     onDismiss = { finish() },
                     onCopy = { copiedText ->
                         copyToClipboard(copiedText)
@@ -75,16 +85,58 @@ class ProcessTextActivity : ComponentActivity() {
         }
     }
 
+    /**
+     * 浮窗已显示时又选中了新的文字（singleTop 复用当前实例），
+     * 直接用新文本刷新，而不是什么都不做。
+     */
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        val text = extractText(intent)
+        if (!text.isNullOrBlank()) currentText = text
+    }
+
     override fun onDestroy() {
         scope.cancel()
         super.onDestroy()
     }
 
+    /**
+     * 从各种入口的 Intent 中取出要翻译的文本。
+     *
+     * 不同 App / ROM 传文本的方式五花八门：
+     * - PROCESS_TEXT 放在 EXTRA_PROCESS_TEXT（可能是带链接的 Spanned）
+     * - SEND 一般放在 EXTRA_TEXT，但类型可能是 text/html、text/x-uri 等，
+     *   有的只放在 ClipData 里，有的放在 EXTRA_HTML_TEXT
+     * 按顺序逐个尝试，取到第一个非空的为止。
+     */
     private fun extractText(intent: Intent?): String? {
-        // 使用 coerceToText 风格处理 PROCESS_TEXT（兼容带链接/富文本）
-        val text = intent?.getCharSequenceExtra(Intent.EXTRA_PROCESS_TEXT)?.toString()?.trim()
-        return text
+        intent ?: return null
+
+        val candidates = sequence {
+            yield(intent.getCharSequenceExtra(Intent.EXTRA_PROCESS_TEXT)?.toString())
+            yield(intent.getCharSequenceExtra(Intent.EXTRA_TEXT)?.toString())
+            // ClipData：部分 App 分享时只把文本放这里，链接文本也可能被拆成多项
+            intent.clipData?.let { clip ->
+                val sb = StringBuilder()
+                for (i in 0 until clip.itemCount) {
+                    val item = clip.getItemAt(i)
+                    val t = item.text ?: item.htmlText?.let { htmlToPlain(it) }
+                    t?.let { sb.append(it) }
+                }
+                yield(sb.toString())
+            }
+            intent.getStringExtra(Intent.EXTRA_HTML_TEXT)?.let { yield(htmlToPlain(it)) }
+            yield(intent.getCharSequenceExtra(Intent.EXTRA_SUBJECT)?.toString())
+        }
+
+        return candidates
+            .mapNotNull { it?.trim() }
+            .firstOrNull { it.isNotEmpty() }
     }
+
+    private fun htmlToPlain(html: String): String =
+        HtmlCompat.fromHtml(html, HtmlCompat.FROM_HTML_MODE_LEGACY).toString()
 
     private fun copyToClipboard(text: String) {
         val clipboard = getSystemService(CLIPBOARD_SERVICE) as ClipboardManager
@@ -116,6 +168,11 @@ private fun TranslationPopup(
 
     // 执行翻译
     LaunchedEffect(text) {
+        // 文本变化（onNewIntent）时重置状态
+        isLoading = true
+        result = null
+        errorMsg = null
+
         val appId = CredentialManager.getAppId(ctx)
         val secretKey = CredentialManager.getSecretKey(ctx)
 

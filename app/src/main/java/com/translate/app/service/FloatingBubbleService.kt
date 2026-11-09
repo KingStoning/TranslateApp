@@ -234,12 +234,15 @@ class FloatingBubbleService : Service() {
             }
 
             // 启动 Activity 处理翻译和显示
-            // 使用 NEW_TASK 创建独立任务，不加 CLEAR_TOP 避免冲掉主界面
+            // ProcessTextActivity 使用独立 taskAffinity，NEW_TASK 不会把主界面拉到前台；
+            // CLEAR_TASK 保证每次都是全新的浮窗，不会复用上一次的旧文本。
+            // （不再使用 LAUNCH_ADJACENT：它是分屏用的标志，部分 ROM 上会导致浮窗不弹出或进入分屏）
             startActivity(
                 Intent(this, ProcessTextActivity::class.java).apply {
                     putExtra(Intent.EXTRA_PROCESS_TEXT, text)
                     addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                    addFlags(Intent.FLAG_ACTIVITY_LAUNCH_ADJACENT)
+                    addFlags(Intent.FLAG_ACTIVITY_CLEAR_TASK)
+                    addFlags(Intent.FLAG_ACTIVITY_NO_ANIMATION)
                 }
             )
         } catch (_: Exception) {
