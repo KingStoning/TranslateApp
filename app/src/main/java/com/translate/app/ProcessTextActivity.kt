@@ -28,7 +28,13 @@ import androidx.compose.ui.unit.sp
 import androidx.core.text.HtmlCompat
 import com.translate.app.data.CredentialManager
 import com.translate.app.data.api.ApiClient
+import com.translate.app.data.history.HistoryRepository
 import com.translate.app.data.model.TranslationResult
+import com.translate.app.data.repository.BaiduApiException
+import com.translate.app.tts.Speaker
+import com.translate.app.ui.common.TranslationResultContent
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import com.translate.app.ui.theme.TranslateAppTheme
 import kotlinx.coroutines.*
 
@@ -98,6 +104,7 @@ class ProcessTextActivity : ComponentActivity() {
 
     override fun onDestroy() {
         scope.cancel()
+        Speaker.stop()
         super.onDestroy()
     }
 
@@ -189,9 +196,11 @@ internal fun TranslationCard(
         r.onSuccess { t ->
             result = t
             isLoading = false
+            HistoryRepository.add(t)
             // ⚡ 不再自动关闭，用户看完后点击空白处或 ✕ 按钮手动关闭
         }.onFailure { e ->
             errorMsg = when {
+                e is BaiduApiException -> e.message
                 e.message?.contains("Unable to resolve host") == true -> "网络连接失败"
                 e.message?.contains("timeout") == true -> "网络请求超时"
                 else -> "翻译失败：${e.message ?: "未知错误"}"
@@ -242,9 +251,14 @@ internal fun TranslationCard(
                 }
             }
 
-            Spacer(Modifier.height(12.dp))
+            Spacer(Modifier.height(8.dp))
 
-            // 内容
+            // 内容（单词释义可能较长：限制高度，可滚动）
+            Column(
+                modifier = Modifier
+                    .heightIn(max = 460.dp)
+                    .verticalScroll(rememberScrollState())
+            ) {
             when {
                 isLoading -> {
                     Row(
@@ -279,48 +293,9 @@ internal fun TranslationCard(
                     }
                 }
                 result != null -> {
-                    val r = result!!
-
-                    // 原文
-                    Text(
-                        text = r.originalText,
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        maxLines = 3,
-                        overflow = TextOverflow.Ellipsis
-                    )
-
-                    Spacer(Modifier.height(8.dp))
-                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-                    Spacer(Modifier.height(8.dp))
-
-                    // 译文
-                    Text(
-                        text = r.translatedText,
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 18.sp,
-                        color = MaterialTheme.colorScheme.onSurface
-                    )
-
-                    Spacer(Modifier.height(12.dp))
-
-                    // 操作按钮
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.End
-                    ) {
-                        TextButton(onClick = { onCopy(r.translatedText) }) {
-                            Icon(
-                                Icons.Default.ContentCopy,
-                                contentDescription = null,
-                                modifier = Modifier.size(16.dp)
-                            )
-                            Spacer(Modifier.width(4.dp))
-                            Text("复制译文", style = MaterialTheme.typography.labelLarge)
-                        }
-                    }
+                    TranslationResultContent(result = result!!, onCopy = onCopy)
                 }
+            }
             }
         }
     }

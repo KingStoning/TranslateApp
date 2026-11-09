@@ -28,6 +28,7 @@ import androidx.savedstate.SavedStateRegistryController
 import androidx.savedstate.SavedStateRegistryOwner
 import androidx.savedstate.setViewTreeSavedStateRegistryOwner
 import com.translate.app.TranslationCard
+import com.translate.app.tts.Speaker
 import com.translate.app.ui.theme.TranslateAppTheme
 
 /**
@@ -121,6 +122,7 @@ class OverlayTranslationWindow(context: Context) {
     fun dismiss() {
         val v = root ?: return
         root = null
+        Speaker.stop()
         try { windowManager.removeView(v) } catch (_: Exception) {}
         owner?.destroy()
         owner = null
