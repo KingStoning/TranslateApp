@@ -71,7 +71,8 @@ fun TranslateAppTheme(
     val view = LocalView.current
     if (!view.isInEditMode) {
         SideEffect {
-            val window = (view.context as Activity).window
+            // 系统悬浮窗（Service 中的 ComposeView）没有 Activity，跳过状态栏设置
+            val window = (view.context as? Activity)?.window ?: return@SideEffect
             window.statusBarColor = colorScheme.primary.toArgb()
             WindowCompat.getInsetsController(window, view).isAppearanceLightStatusBars = !darkTheme
         }
