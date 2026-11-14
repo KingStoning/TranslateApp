@@ -22,6 +22,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.translate.app.data.model.TranslationResult
 import com.translate.app.data.model.WordDetail
+import com.translate.app.data.repository.WordMode
 import com.translate.app.tts.Speaker
 
 /**
@@ -39,9 +40,8 @@ fun TranslationResultContent(
         if (detail != null) {
             WordDetailSection(
                 detail = detail,
-                mainTranslation = result.translatedText,
-                lang = result.fromLanguage,
-                ttsUrl = result.srcTtsUrl
+                mainTranslation = null, // 离线词典结果：主译文就是第一条释义，不重复显示
+                lang = result.fromLanguage
             )
         } else {
             // 原文
@@ -54,7 +54,7 @@ fun TranslationResultContent(
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f).padding(top = 6.dp)
                 )
-                SpeakButton(result.originalText, result.fromLanguage, fallbackUrl = result.srcTtsUrl)
+                SpeakButton(result.originalText, result.fromLanguage)
             }
 
             Spacer(Modifier.height(4.dp))
@@ -71,13 +71,13 @@ fun TranslationResultContent(
                     color = MaterialTheme.colorScheme.onSurface,
                     modifier = Modifier.weight(1f).padding(top = 6.dp)
                 )
-                SpeakButton(result.translatedText, result.toLanguage, fallbackUrl = result.dstTtsUrl)
+                SpeakButton(result.translatedText, result.toLanguage)
             }
 
-            if (result.isWordQuery) {
+            if (WordMode.isWordQuery(result.originalText)) {
                 Spacer(Modifier.height(8.dp))
                 Text(
-                    "未获取到词典释义。在百度翻译开放平台开通「词典」资源后，查单词会显示音标、词性和全部释义。",
+                    "离线词库未收录该词，以上为机器翻译。",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.outline
                 )
@@ -133,11 +133,37 @@ fun WordDetailSection(
                     SpeakButton(detail.word, "en", Speaker.Accent.US, ttsUrl, size = 32.dp)
                 }
             }
+        } else if (isEnglish) {
+            // 离线词库只有一个音标：显示音标，英 / 美两种发音都可以听
+            if (!detail.phoneticOther.isNullOrBlank()) {
+                Text(
+                    "/${detail.phoneticOther}/",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.align(Alignment.CenterVertically).padding(end = 8.dp)
+                )
+            }
+            PhoneticChip("英", null) {
+                SpeakButton(detail.word, "en", Speaker.Accent.UK, ttsUrl, size = 32.dp)
+            }
+            PhoneticChip("美", null) {
+                SpeakButton(detail.word, "en", Speaker.Accent.US, ttsUrl, size = 32.dp)
+            }
         } else {
             PhoneticChip(null, detail.phoneticOther) {
                 SpeakButton(detail.word, lang, fallbackUrl = ttsUrl, size = 32.dp)
             }
         }
+    }
+
+    // 变形说明，如「booked 是 book 的过去式、过去分词」
+    detail.note?.let { note ->
+        Text(
+            note,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.tertiary,
+            modifier = Modifier.padding(bottom = 2.dp)
+        )
     }
 
     // 考试标签

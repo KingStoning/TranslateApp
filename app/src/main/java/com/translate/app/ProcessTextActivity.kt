@@ -31,6 +31,7 @@ import com.translate.app.data.api.ApiClient
 import com.translate.app.data.history.HistoryRepository
 import com.translate.app.data.model.TranslationResult
 import com.translate.app.data.repository.BaiduApiException
+import com.translate.app.data.repository.MissingCredentialsException
 import com.translate.app.tts.Speaker
 import com.translate.app.ui.common.TranslationResultContent
 import androidx.compose.foundation.rememberScrollState
@@ -179,14 +180,9 @@ internal fun TranslationCard(
         result = null
         errorMsg = null
 
+        // 未配置密钥时，仓库仍会先查离线词库；只有需要调用百度时才报错
         val appId = CredentialManager.getAppId(ctx)
         val secretKey = CredentialManager.getSecretKey(ctx)
-
-        if (appId.isBlank() || secretKey.isBlank()) {
-            errorMsg = "请先打开 App 设置页面配置百度翻译 APP ID 和密钥"
-            isLoading = false
-            return@LaunchedEffect  // ← 不再自动关闭，用户看了手动关
-        }
 
         val r = ApiClient.translateRepository.translate(
             query = text,
@@ -200,7 +196,7 @@ internal fun TranslationCard(
             // ⚡ 不再自动关闭，用户看完后点击空白处或 ✕ 按钮手动关闭
         }.onFailure { e ->
             errorMsg = when {
-                e is BaiduApiException -> e.message
+                e is BaiduApiException || e is MissingCredentialsException -> e.message
                 e.message?.contains("Unable to resolve host") == true -> "网络连接失败"
                 e.message?.contains("timeout") == true -> "网络请求超时"
                 else -> "翻译失败：${e.message ?: "未知错误"}"

@@ -1,18 +1,19 @@
 package com.translate.app.data.repository
 
-import android.content.Context
-import com.translate.app.App
 import com.translate.app.data.api.BaiduTranslateService
 import com.translate.app.data.api.SignUtil
-import com.translate.app.data.dict.DictParser
+import com.translate.app.data.dict.OfflineDict
 import com.translate.app.data.model.TranslationResult
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import java.util.UUID
 
 /** 百度接口返回的业务错误 */
 class BaiduApiException(val code: String, message: String) : Exception(message)
+
+/** 没有配置百度翻译 APP ID / 密钥 */
+class MissingCredentialsException :
+    Exception("请先打开 App 设置页面配置百度翻译 APP ID 和密钥")
 
 /**
  * 翻译仓库 - 封装翻译 API 调用逻辑
@@ -21,10 +22,12 @@ class TranslateRepository(
     private val baiduService: BaiduTranslateService
 ) {
     /**
-     * 使用百度翻译 API 翻译文本。
+     * 翻译文本。
      *
-     * 选中的是单词 / 短语时（单词模式）会额外请求词典资源（音标、词性释义、词形变化、英英释义），
-     * 词典需要在百度翻译开放平台开通；没开通时自动退回普通翻译。
+     * 单词模式：选中的是英文单词 / 短语且内置离线词库收录了它时，直接返回词典释义
+     * （音标、各词性全部释义、词形变化、考试标签、英英释义），
+     * 不请求百度：秒出结果、不耗额度、没网也能查、不需要配置密钥。
+     * 其余情况调用百度翻译。
      */
     suspend fun translate(
         query: String,
@@ -33,65 +36,25 @@ class TranslateRepository(
         from: String = "auto",
         to: String = "zh"
     ): Result<TranslationResult> = withContext(Dispatchers.IO) {
-        if (!WordMode.isWordQuery(query)) {
-            return@withContext request(query, appId, secretKey, from, to, dictFlag = null)
-        }
-        translateWord(query, appId, secretKey, from, to)
-    }
-
-    /**
-     * 单词模式。
-     *
-     * 官方文档写 dict=0 表示「显示词典」，但部分资料写法相反，所以第一次会依次试 0 和 1，
-     * 记住能拿到词典数据的那个值；两个都拿不到（多半是没开通词典），24 小时内不再试探，
-     * 避免每次查词都多消耗一次请求。
-     */
-    private suspend fun translateWord(
-        query: String, appId: String, secretKey: String, from: String, to: String
-    ): Result<TranslationResult> {
-        val prefs = App.instance.getSharedPreferences(DICT_PREFS, Context.MODE_PRIVATE)
-        val knownFlag = prefs.getInt(KEY_DICT_FLAG, -1)
-
-        if (knownFlag == 0 || knownFlag == 1) {
-            val r = request(query, appId, secretKey, from, to, dictFlag = knownFlag)
-            // 带 dict 参数出错（比如服务被关闭）→ 退回普通翻译，并重新试探
-            if (r.isFailure && r.exceptionOrNull() is BaiduApiException) {
-                prefs.edit().putInt(KEY_DICT_FLAG, -1).apply()
-                return request(query, appId, secretKey, from, to, dictFlag = null)
+        if (WordMode.isWordQuery(query)) {
+            val detail = OfflineDict.lookup(query)
+            if (detail != null) {
+                return@withContext Result.success(
+                    TranslationResult(
+                        originalText = query.trim(),
+                        translatedText = detail.parts.firstOrNull()?.means?.firstOrNull() ?: "",
+                        fromLanguage = "en",
+                        toLanguage = "zh",
+                        wordDetail = detail
+                    )
+                )
             }
-            return r.map { it.copy(isWordQuery = true) }
         }
 
-        val now = System.currentTimeMillis()
-        if (now < prefs.getLong(KEY_UNAVAILABLE_UNTIL, 0L)) {
-            return request(query, appId, secretKey, from, to, dictFlag = null)
-                .map { it.copy(isWordQuery = true) }
+        if (appId.isBlank() || secretKey.isBlank()) {
+            return@withContext Result.failure(MissingCredentialsException())
         }
-
-        var lastSuccess: Result<TranslationResult>? = null
-        for ((index, flag) in listOf(0, 1).withIndex()) {
-            if (index > 0) delay(1100) // 标准版 QPS=1，避免 54003 频率限制
-            val r = request(query, appId, secretKey, from, to, dictFlag = flag)
-            val value = r.getOrNull()
-            if (value?.wordDetail != null) {
-                prefs.edit().putInt(KEY_DICT_FLAG, flag).apply()
-                return Result.success(value.copy(isWordQuery = true))
-            }
-            if (r.isFailure) {
-                // 凭据错误 / 网络错误 / 频率限制：不是「没开通词典」，不要记为不可用。
-                // 百度业务错误时再用不带 dict 的普通请求兜底（真正的凭据错误会在这里如实报出）
-                val result = lastSuccess
-                    ?: if (r.exceptionOrNull() is BaiduApiException)
-                        request(query, appId, secretKey, from, to, dictFlag = null)
-                    else r
-                return result.map { it.copy(isWordQuery = true) }
-            }
-            lastSuccess = r
-        }
-
-        prefs.edit().putLong(KEY_UNAVAILABLE_UNTIL, now + 24 * 60 * 60 * 1000L).apply()
-        val fallback = lastSuccess ?: request(query, appId, secretKey, from, to, dictFlag = null)
-        return fallback.map { it.copy(isWordQuery = true) }
+        request(query, appId, secretKey, from, to)
     }
 
     private suspend fun request(
@@ -99,8 +62,7 @@ class TranslateRepository(
         appId: String,
         secretKey: String,
         from: String,
-        to: String,
-        dictFlag: Int?
+        to: String
     ): Result<TranslationResult> {
         return try {
             val salt = UUID.randomUUID().toString().replace("-", "").take(10)
@@ -117,9 +79,7 @@ class TranslateRepository(
                 to = to,
                 appId = appId,
                 salt = salt,
-                sign = sign,
-                dict = dictFlag,
-                tts = dictFlag
+                sign = sign
             )
 
             val code = response.errorCode
@@ -131,17 +91,12 @@ class TranslateRepository(
             if (transResult.isNullOrEmpty()) {
                 Result.failure(Exception("翻译结果为空"))
             } else {
-                val first = transResult.first()
-                val detail = if (dictFlag != null) DictParser.parse(first.dict, query.trim()) else null
                 Result.success(
                     TranslationResult(
                         originalText = query,
                         translatedText = transResult.joinToString("\n") { it.dst },
                         fromLanguage = response.from ?: from,
-                        toLanguage = response.to ?: to,
-                        wordDetail = detail,
-                        srcTtsUrl = first.srcTts?.takeIf { it.isNotBlank() },
-                        dstTtsUrl = first.dstTts?.takeIf { it.isNotBlank() }
+                        toLanguage = response.to ?: to
                     )
                 )
             }
@@ -151,10 +106,6 @@ class TranslateRepository(
     }
 
     companion object {
-        private const val DICT_PREFS = "baidu_dict"
-        private const val KEY_DICT_FLAG = "dict_flag"
-        private const val KEY_UNAVAILABLE_UNTIL = "dict_unavailable_until"
-
         /** 百度错误码 → 中文说明 */
         fun describeError(code: String, msg: String?): String = when (code) {
             "52001" -> "请求超时，请重试"
@@ -176,11 +127,11 @@ class TranslateRepository(
 
 /** 判断选中内容是否适合「单词模式」 */
 object WordMode {
-    // 1~3 个英文单词（允许 ' 和 -），如 apple / give up / mother-in-law
+    // 1~3 个英文单词（允许 ' 和 -），如 apple / give up / mother-in-law；首尾标点会被忽略
     private val ENGLISH_WORD = Regex("^[A-Za-z][A-Za-z'’\\-]*(?: [A-Za-z][A-Za-z'’\\-]*){0,2}$")
 
     fun isWordQuery(text: String): Boolean {
-        val t = text.trim()
+        val t = text.trim().trim('.', ',', '!', '?', ';', ':', '"', '“', '”', '(', ')')
         return t.length in 1..40 && ENGLISH_WORD.matches(t)
     }
 }

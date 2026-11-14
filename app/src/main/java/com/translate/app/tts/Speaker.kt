@@ -8,13 +8,15 @@ import android.os.Looper
 import android.speech.tts.TextToSpeech
 import android.util.Log
 import android.widget.Toast
+import java.net.URLEncoder
 import java.util.Locale
 
 /**
  * 朗读（系统 TextToSpeech）。
  *
  * - 根据百度返回的语种代码选择发音语言，英文单词可分别读英式 / 美式
- * - 手机没有对应语言的语音包时，若百度返回了 TTS 链接（开通了语音资源），用它兜底播放
+ * - 手机没有英文语音包（或没有语音引擎）时，英文改用有道词典的真人发音音频兜底（需联网；
+ *   dict.youdao.com/dictvoice 是有道网页版使用的公开地址，非官方 API，失效时仅提示下载语音包）
  * - 全局单例，第一次朗读时才初始化引擎
  */
 object Speaker {
@@ -34,7 +36,7 @@ object Speaker {
     /**
      * 朗读文本。
      * @param lang 百度语种代码（en / zh / jp / kor …），未知时按文本内容猜测
-     * @param fallbackUrl 系统 TTS 不可用时播放的 mp3 链接（百度 src_tts / dst_tts）
+     * @param fallbackUrl 系统 TTS 不可用时播放的 mp3 链接；为空时英文自动使用有道发音
      */
     fun speak(
         context: Context,
@@ -55,15 +57,16 @@ object Speaker {
         }
     }
 
-    private fun speakInternal(text: String, lang: String?, accent: Accent, fallbackUrl: String?) {
+    private fun speakInternal(text: String, lang: String?, accent: Accent, fallbackUrlIn: String?) {
         stopPlaying()
+        val fallbackUrl = fallbackUrlIn ?: youdaoVoiceUrl(text, lang, accent)
         if (initFailed) {
             if (!playUrl(fallbackUrl)) toast("没有可用的语音引擎，请在系统设置 → 文字转语音中安装")
             return
         }
         val engine = tts
         if (engine == null || !ready) {
-            pending = { speakInternal(text, lang, accent, fallbackUrl) }
+            pending = { speakInternal(text, lang, accent, fallbackUrlIn) }
             if (engine == null) initEngine()
             return
         }
@@ -122,6 +125,14 @@ object Speaker {
             "vie" -> Locale("vi", "VN")
             else -> Locale.US
         }
+    }
+
+    /** 有道词典发音：type=1 英音，type=2 美音。只用于较短的英文 */
+    private fun youdaoVoiceUrl(text: String, lang: String?, accent: Accent): String? {
+        val code = if (lang.isNullOrEmpty() || lang == "auto") guessLang(text) else lang
+        if (code != "en" || text.length > 200) return null
+        val type = if (accent == Accent.UK) 1 else 2
+        return "https://dict.youdao.com/dictvoice?audio=${URLEncoder.encode(text, "UTF-8")}&type=$type"
     }
 
     private fun guessLang(text: String): String = when {

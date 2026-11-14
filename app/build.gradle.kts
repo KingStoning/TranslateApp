@@ -89,6 +89,8 @@ dependencies {
 
     // Unit tests
     testImplementation("junit:junit:4.13.2")
+    // 单元测试中直接读取内置词库，验证全部词条都能被正确解析
+    testImplementation("org.xerial:sqlite-jdbc:3.46.1.3")
 
     // Debug
     debugImplementation("androidx.compose.ui:ui-tooling")

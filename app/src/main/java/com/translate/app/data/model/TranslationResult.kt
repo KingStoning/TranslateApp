@@ -1,6 +1,5 @@
 package com.translate.app.data.model
 
-import com.google.gson.JsonElement
 import com.google.gson.annotations.SerializedName
 
 /**
@@ -17,12 +16,7 @@ data class BaiduTranslationResponse(
 
 data class BaiduTransResult(
     @SerializedName("src") val src: String,
-    @SerializedName("dst") val dst: String,
-    /** 词典资源（开通词典后返回）。文档中既有 JSON 字符串也有对象两种写法，用 JsonElement 兼容 */
-    @SerializedName("dict") val dict: JsonElement?,
-    /** 原文 / 译文语音 mp3 链接（开通 TTS 后返回） */
-    @SerializedName("src_tts") val srcTts: String?,
-    @SerializedName("dst_tts") val dstTts: String?
+    @SerializedName("dst") val dst: String
 )
 
 /**
@@ -34,16 +28,12 @@ data class TranslationResult(
     val fromLanguage: String = "auto",
     val toLanguage: String = "zh",
     val timestamp: Long = System.currentTimeMillis(),
-    /** 单词模式下的词典释义；非单词或未开通词典时为 null */
-    val wordDetail: WordDetail? = null,
-    /** 是否按单词模式查询（用于在没有词典数据时给出提示） */
-    val isWordQuery: Boolean = false,
-    val srcTtsUrl: String? = null,
-    val dstTtsUrl: String? = null
+    /** 单词模式下的离线词典释义；非单词或词库未收录时为 null */
+    val wordDetail: WordDetail? = null
 )
 
 /**
- * 单词释义（来自百度词典资源 simple_means / edict）
+ * 单词释义（来自内置离线词库 ECDICT）
  */
 data class WordDetail(
     val word: String,
@@ -59,8 +49,10 @@ data class WordDetail(
     val exchanges: List<WordExchange> = emptyList(),
     /** 考试标签，如 高考、CET4、考研 */
     val tags: List<String> = emptyList(),
-    /** 英英释义 + 例句（edict） */
-    val englishDefinitions: List<EnglishDefinition> = emptyList()
+    /** 英英释义 + 例句 */
+    val englishDefinitions: List<EnglishDefinition> = emptyList(),
+    /** 补充说明，如「booked 是 book 的过去式、过去分词」 */
+    val note: String? = null
 ) {
     val hasContent: Boolean
         get() = parts.isNotEmpty() || englishDefinitions.isNotEmpty()
