@@ -4,11 +4,14 @@ import com.google.gson.annotations.SerializedName
 
 /**
  * 百度翻译 API 响应
+ * 出错时只有 error_code / error_msg，from / to / trans_result 都为空，所以全部可空。
  */
 data class BaiduTranslationResponse(
-    @SerializedName("from") val from: String,
-    @SerializedName("to") val to: String,
-    @SerializedName("trans_result") val transResult: List<BaiduTransResult>?
+    @SerializedName("from") val from: String?,
+    @SerializedName("to") val to: String?,
+    @SerializedName("trans_result") val transResult: List<BaiduTransResult>?,
+    @SerializedName("error_code") val errorCode: String?,
+    @SerializedName("error_msg") val errorMsg: String?
 )
 
 data class BaiduTransResult(
@@ -24,7 +27,52 @@ data class TranslationResult(
     val translatedText: String,
     val fromLanguage: String = "auto",
     val toLanguage: String = "zh",
-    val timestamp: Long = System.currentTimeMillis()
+    val timestamp: Long = System.currentTimeMillis(),
+    /** 单词模式下的离线词典释义；非单词或词库未收录时为 null */
+    val wordDetail: WordDetail? = null
+)
+
+/**
+ * 单词释义（来自内置离线词库 ECDICT）
+ */
+data class WordDetail(
+    val word: String,
+    /** 英式音标 */
+    val phoneticUk: String? = null,
+    /** 美式音标 */
+    val phoneticUs: String? = null,
+    /** 其他音标（如中文拼音） */
+    val phoneticOther: String? = null,
+    /** 词性 + 释义，如 n. → [苹果, 苹果树] */
+    val parts: List<WordPart> = emptyList(),
+    /** 词形变化，如 复数 → apples */
+    val exchanges: List<WordExchange> = emptyList(),
+    /** 考试标签，如 高考、CET4、考研 */
+    val tags: List<String> = emptyList(),
+    /** 英英释义 + 例句 */
+    val englishDefinitions: List<EnglishDefinition> = emptyList(),
+    /** 补充说明，如「booked 是 book 的过去式、过去分词」 */
+    val note: String? = null
+) {
+    val hasContent: Boolean
+        get() = parts.isNotEmpty() || englishDefinitions.isNotEmpty()
+
+    /** 一行摘要，如「n. 苹果；苹果树  v. …」，用于历史记录 */
+    fun summary(maxParts: Int = 3): String =
+        parts.take(maxParts).joinToString("  ") { p ->
+            (if (p.part.isNotBlank()) "${p.part} " else "") + p.means.take(3).joinToString("；")
+        }
+}
+
+data class WordPart(val part: String, val means: List<String>)
+
+data class WordExchange(val label: String, val forms: List<String>)
+
+data class EnglishDefinition(
+    val pos: String,
+    val definitions: List<String>,
+    val examples: List<String>,
+    val similarWords: List<String> = emptyList()
 )
 
 /**

@@ -9,6 +9,13 @@
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
 
+    <!-- Android 11+ 包可见性：不声明则 TextToSpeech 找不到系统语音引擎，朗读无声 -->
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.TTS_SERVICE" />
+        </intent>
+    </queries>
+
     <application
         android:name=".App"
         android:allowBackup="true"
@@ -31,16 +38,35 @@
             </intent-filter>
         </activity>
 
-        <!-- Process Text Activity - 划词翻译入口 -->
+        <!--
+            翻译浮窗入口（ProcessTextActivity）
+            - PROCESS_TEXT：选中文字后，文本工具栏 / 「更多 ⋮」菜单里的「翻译」
+            - SEND：选中文字后点「分享」，或 App 的「更多 → 分享/发送」，在分享面板里选「翻译」
+            taskAffinity="" 让浮窗不和 MainActivity 共用任务栈：
+            否则当 App 主界面在后台时，部分 ROM（ColorOS/OxygenOS 等）会把整个
+            主界面任务拉到前台，看起来像"跳进了 App"而不是在原应用上弹窗，
+            或者复用旧任务导致新的选中文字没有被翻译。
+        -->
         <activity
             android:name=".ProcessTextActivity"
+            android:label="@string/translate"
             android:excludeFromRecents="true"
             android:exported="true"
+            android:taskAffinity=""
+            android:launchMode="singleTop"
+            android:noHistory="true"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden|uiMode"
             android:theme="@style/Theme.TranslateApp.Popup">
-            <intent-filter>
+            <intent-filter android:label="@string/translate">
                 <action android:name="android.intent.action.PROCESS_TEXT" />
                 <category android:name="android.intent.category.DEFAULT" />
                 <data android:mimeType="text/plain" />
+            </intent-filter>
+            <!-- 分享面板：不少 App 分享的不是 text/plain（如 text/html、text/x-uri），统一接收 text/* -->
+            <intent-filter android:label="@string/translate">
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="text/*" />
             </intent-filter>
         </activity>
 

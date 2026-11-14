@@ -9,17 +9,21 @@ import android.content.Intent
 import android.graphics.PixelFormat
 import android.graphics.drawable.GradientDrawable
 import android.os.Build
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
 import android.view.WindowManager
 import android.widget.ImageView
+import android.widget.Toast
 import androidx.core.app.NotificationCompat
 import com.translate.app.App
 import com.translate.app.MainActivity
 import com.translate.app.ProcessTextActivity
 import com.translate.app.R
+import com.translate.app.ui.overlay.OverlayTranslationWindow
 import kotlinx.coroutines.*
 
 /**
@@ -29,7 +33,7 @@ import kotlinx.coroutines.*
  * 点击后按优先级获取要翻译的文本：
  *   1. 无障碍服务捕获的选中文本（无需复制）
  *   2. 剪贴板内容（兜底方案）
- * 获取文本后调用百度翻译 API，结果以悬浮窗展示。
+ * 获取文本后由服务直接显示翻译悬浮窗（不启动 Activity，后台也能弹出）。
  */
 class FloatingBubbleService : Service() {
 
@@ -42,6 +46,8 @@ class FloatingBubbleService : Service() {
     )
     private lateinit var windowManager: WindowManager
     private var bubbleView: ImageView? = null
+    private var overlayWindow: OverlayTranslationWindow? = null
+    private var clipboardProbe: View? = null
 
     @Volatile
     private var isTranslating = false
@@ -74,6 +80,9 @@ class FloatingBubbleService : Service() {
 
     override fun onDestroy() {
         serviceScope.cancel()
+        removeClipboardProbe()
+        overlayWindow?.dismiss()
+        overlayWindow = null
         removeBubble()
         super.onDestroy()
     }
@@ -217,60 +226,162 @@ class FloatingBubbleService : Service() {
     // ========================================================================
 
     /**
-     * 翻译入口。
+     * 翻译入口（点击悬浮球）。
      *
-     * 获取文本后启动 ProcessTextActivity 来处理翻译和显示。
-     * 服务本身不创建任何弹窗，避免 Service Context 叠加窗口引发崩溃。
+     * App 在后台时有两道系统限制，之前的实现两道都踩中了，所以「退到后台后点悬浮球没反应」：
+     * 1. Android 10+ 只有拥有窗口焦点的 App 才能读剪贴板。悬浮球是 FLAG_NOT_FOCUSABLE，
+     *    直接读剪贴板拿到的是 null —— 于是什么都不弹。
+     *    → 现在先临时加一个可获得焦点的 1px 悬浮窗，拿到焦点后再读剪贴板（readClipboardWithFocus）。
+     * 2. 后台 startActivity 会被 Android 10+ 及 ColorOS/MIUI 的「后台弹出界面」权限静默拦截。
+     *    → 现在由服务直接显示系统悬浮窗（OverlayTranslationWindow），不再启动 Activity。
      */
     private fun performTranslation() {
         if (isTranslating) return
         isTranslating = true
 
-        try {
-            val text = resolveTranslateText()
-            if (text.isNullOrBlank() || text.length > 5000 || text.length < 2) {
-                isTranslating = false
-                return
-            }
-
-            // 启动 Activity 处理翻译和显示
-            // 使用 NEW_TASK 创建独立任务，不加 CLEAR_TOP 避免冲掉主界面
-            startActivity(
-                Intent(this, ProcessTextActivity::class.java).apply {
-                    putExtra(Intent.EXTRA_PROCESS_TEXT, text)
-                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                    addFlags(Intent.FLAG_ACTIVITY_LAUNCH_ADJACENT)
-                }
-            )
-        } catch (_: Exception) {
-            // 任何异常都不让悬浮球消失
-        } finally {
+        resolveTranslateText { text ->
             isTranslating = false
+            when {
+                text.isNullOrBlank() -> toast("没有获取到文字，请先选中文字并点「复制」")
+                text.length > 5000 -> toast("文字太长（超过 5000 字），请缩短后再试")
+                else -> showTranslation(text)
+            }
+        }
+    }
+
+    private fun showTranslation(text: String) {
+        val window = overlayWindow ?: OverlayTranslationWindow(this).also { overlayWindow = it }
+        try {
+            window.show(text)
+        } catch (e: Exception) {
+            android.util.Log.w(TAG, "悬浮窗显示失败，降级为 Activity", e)
+            // 降级：App 在前台或系统允许后台弹出时仍可用
+            try {
+                startActivity(
+                    Intent(this, ProcessTextActivity::class.java).apply {
+                        putExtra(Intent.EXTRA_PROCESS_TEXT, text)
+                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        addFlags(Intent.FLAG_ACTIVITY_CLEAR_TASK)
+                        addFlags(Intent.FLAG_ACTIVITY_NO_ANIMATION)
+                    }
+                )
+            } catch (e2: Exception) {
+                android.util.Log.e(TAG, "启动翻译界面失败", e2)
+                toast("无法显示翻译，请检查「显示在其他应用上层」权限")
+            }
         }
     }
 
     /**
-     * 获取要翻译的文本。
-     * 优先从无障碍服务获取选中文本，失败则读剪贴板。
+     * 获取要翻译的文本（异步回调，始终在主线程回调）。
+     * 优先从无障碍服务获取选中文本，其次读剪贴板。
      */
-    private fun resolveTranslateText(): String? {
+    private fun resolveTranslateText(callback: (String?) -> Unit) {
         // 1) 无障碍服务捕获的选中文本
         try {
             val accText = TranslateAccessibilityService.getSelectedText()
-            if (!accText.isNullOrBlank()) return accText
+            if (!accText.isNullOrBlank()) {
+                callback(accText.trim())
+                return
+            }
         } catch (_: Exception) { /* 忽略 */ }
 
-        // 2) 剪贴板内容 — 遍历所有 clip 项拼接纯文本（链接会将文字拆成多项）
-        try {
-            val clip = (getSystemService(CLIPBOARD_SERVICE) as ClipboardManager).primaryClip ?: return null
+        // 2) 剪贴板：App 在前台 / Android 9 及以下可以直接读到
+        val direct = readClipboard()
+        if (!direct.isNullOrBlank()) {
+            callback(direct)
+            return
+        }
+
+        // 3) 后台读不到：临时获取窗口焦点后再读
+        readClipboardWithFocus(callback)
+    }
+
+    /** 读取剪贴板纯文本 — 遍历所有 clip 项拼接（链接会将文字拆成多项） */
+    private fun readClipboard(): String? {
+        return try {
+            val clip = (getSystemService(CLIPBOARD_SERVICE) as ClipboardManager).primaryClip
+                ?: return null
             val sb = StringBuilder()
             for (i in 0 until clip.itemCount) {
-                clip.getItemAt(i).text?.toString()?.let { sb.append(it) }
+                clip.getItemAt(i).coerceToText(this)?.let { sb.append(it) }
             }
-            return sb.toString().trim().takeIf { it.isNotBlank() }
-        } catch (_: Exception) { /* 忽略 */ }
+            sb.toString().trim().takeIf { it.isNotBlank() }
+        } catch (_: Exception) {
+            null
+        }
+    }
 
-        return null
+    /**
+     * Android 10+ 后台读剪贴板的标准做法：
+     * 添加一个 1px、可获得焦点的透明悬浮窗，在 onWindowFocusChanged(true) 时读剪贴板，
+     * 读完立即移除，把焦点还给原来的 App。超时也会兜底读一次。
+     */
+    private fun readClipboardWithFocus(callback: (String?) -> Unit) {
+        removeClipboardProbe()
+
+        var finished = false
+        val handler = Handler(Looper.getMainLooper())
+        lateinit var probe: View
+        lateinit var timeout: Runnable
+
+        fun finish() {
+            if (finished) return
+            finished = true
+            handler.removeCallbacks(timeout)
+            val text = readClipboard()   // 先读（此时仍持有焦点），再移除窗口
+            if (clipboardProbe === probe) removeClipboardProbe()
+            callback(text)
+        }
+        timeout = Runnable { finish() }
+
+        probe = object : View(this) {
+            override fun onWindowFocusChanged(hasWindowFocus: Boolean) {
+                super.onWindowFocusChanged(hasWindowFocus)
+                if (hasWindowFocus) post { finish() }
+            }
+        }
+
+        val params = WindowManager.LayoutParams(
+            1, 1,
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
+                WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+            else
+                @Suppress("DEPRECATION") WindowManager.LayoutParams.TYPE_PHONE,
+            // 注意：不能有 FLAG_NOT_FOCUSABLE，否则拿不到焦点
+            WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
+                    WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
+                    WindowManager.LayoutParams.FLAG_ALT_FOCUSABLE_IM or
+                    WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+            PixelFormat.TRANSPARENT
+        ).apply {
+            gravity = Gravity.TOP or Gravity.START
+            x = 0
+            y = 0
+        }
+
+        try {
+            windowManager.addView(probe, params)
+            clipboardProbe = probe
+            handler.postDelayed(timeout, 800)
+        } catch (e: Exception) {
+            android.util.Log.w(TAG, "添加剪贴板焦点窗口失败", e)
+            finished = true
+            callback(null)
+        }
+    }
+
+    private fun removeClipboardProbe() {
+        clipboardProbe?.let { v ->
+            try { windowManager.removeView(v) } catch (_: Exception) {}
+        }
+        clipboardProbe = null
+    }
+
+    private fun toast(msg: String) {
+        try {
+            Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()
+        } catch (_: Exception) {}
     }
 
     // ========================================================================
@@ -305,6 +416,7 @@ class FloatingBubbleService : Service() {
         (dp * resources.displayMetrics.density).toInt()
 
     companion object {
+        private const val TAG = "FloatingBubble"
         private const val NOTIFICATION_ID = 1002
 
         fun start(context: Context) {

@@ -8,7 +8,10 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.translate.app.data.CredentialManager
 import com.translate.app.data.api.ApiClient
+import com.translate.app.data.history.HistoryRepository
 import com.translate.app.data.model.TranslationResult
+import com.translate.app.data.repository.BaiduApiException
+import com.translate.app.data.repository.MissingCredentialsException
 import kotlinx.coroutines.launch
 
 /**
@@ -35,10 +38,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     var errorMessage by mutableStateOf<String?>(null)
         private set
 
-    // 历史记录
-    var history by mutableStateOf<List<TranslationResult>>(emptyList())
-        private set
-
     fun onSourceTextChanged(text: String) {
         sourceText = text
         // 清除之前的错误
@@ -55,12 +54,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             return
         }
 
+        // 未配置密钥时，仓库仍会先查离线词库；只有需要调用百度时才报错
         val appId = CredentialManager.getAppId(context)
         val secretKey = CredentialManager.getSecretKey(context)
-        if (appId.isBlank() || secretKey.isBlank()) {
-            errorMessage = "请先在设置中配置百度翻译 APP ID 和密钥"
-            return
-        }
 
         isLoading = true
         errorMessage = null
@@ -69,9 +65,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             val result = repository.translate(query = text, appId = appId, secretKey = secretKey)
             result.onSuccess { translation ->
                 translationResult = translation
-                history = listOf(translation) + history
+                HistoryRepository.add(translation)
             }.onFailure { error ->
                 errorMessage = when {
+                    error is BaiduApiException || error is MissingCredentialsException -> error.message
                     error.message?.contains("Unable to resolve host") == true ->
                         "网络连接失败，请检查网络设置"
                     error.message?.contains("timeout") == true ->
@@ -89,10 +86,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun translateExternal(text: String) {
         sourceText = text
         translate()
-    }
-
-    fun clearHistory() {
-        history = emptyList()
     }
 
     fun clearError() {

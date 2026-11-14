@@ -4,6 +4,8 @@ import android.app.Application
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.os.Build
+import com.translate.app.data.dict.OfflineDict
+import com.translate.app.data.history.HistoryRepository
 
 class App : Application() {
 
@@ -16,6 +18,9 @@ class App : Application() {
     override fun onCreate() {
         super.onCreate()
         instance = this
+        HistoryRepository.init(this)
+        OfflineDict.init(this)
+        OfflineDict.warmUp()
         createNotificationChannels()
     }
 
