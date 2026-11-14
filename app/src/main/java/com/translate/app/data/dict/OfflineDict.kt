@@ -10,13 +10,17 @@ import java.util.zip.GZIPInputStream
 /**
  * 内置离线英汉词库（ECDICT，MIT License，https://github.com/skywind3000/ECDICT）。
  *
- * assets/ecdict.db.gz 由 tools/build_ecdict.py 生成；第一次使用时解压到 App 私有目录。
+ * assets/ecdict.db.gzip 由 tools/build_ecdict.py 生成；第一次使用时解压到 App 私有目录。
  * 查词完全离线，不消耗百度翻译额度，也不需要开通任何词典资源。
  */
 object OfflineDict {
 
     private const val TAG = "OfflineDict"
-    private const val ASSET = "ecdict.db.gz"
+    /**
+     * 注意扩展名不能是 .gz：Android 打包工具会把 assets 里的 .gz 文件自动解压并去掉扩展名，
+     * 运行时按 .gz 打开会找不到文件。
+     */
+    private const val ASSET = "ecdict.db.gzip"
     /** 词库更新时 +1，会重新解压并删除旧文件 */
     private const val DB_VERSION = 1
     private const val DB_NAME = "ecdict-v$DB_VERSION.db"

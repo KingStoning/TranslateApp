@@ -6,7 +6,8 @@
     git clone --depth 1 https://github.com/skywind3000/ECDICT /path/to/ECDICT
     python3 tools/build_ecdict.py /path/to/ECDICT/ecdict.csv
 
-输出: app/src/main/assets/ecdict.db.gz (SQLite, gzip 压缩)
+输出: app/src/main/assets/ecdict.db.gzip (SQLite, gzip 压缩)
+      扩展名故意不用 .gz：Android 打包工具会自动解压 assets 中的 .gz 文件并去掉扩展名
 
 收录范围（在体积和覆盖率之间取舍）:
   - 单词: 有考试标签 / 柯林斯星级 / 牛津 3000，或在 BNC / 当代语料库词频中出现过
@@ -145,7 +146,7 @@ def main(src):
     db.execute("VACUUM")
     db.close()
 
-    out = os.path.join(out_dir, "ecdict.db.gz")
+    out = os.path.join(out_dir, "ecdict.db.gzip")
     with open(tmp, "rb") as fi, gzip.open(out, "wb", compresslevel=9) as fo:
         fo.write(fi.read())
     print(

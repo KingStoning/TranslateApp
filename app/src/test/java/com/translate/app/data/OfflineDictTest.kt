@@ -107,7 +107,7 @@ class OfflineDictTest {
     /** 用真实的内置词库跑一遍：每个词条都能解析，常用词的内容正确 */
     @Test
     fun everyEntryInBundledDictionaryParses() {
-        val gz = File("src/main/assets/ecdict.db.gz")
+        val gz = File("src/main/assets/ecdict.db.gzip")
         assertTrue("词库不存在：${gz.absolutePath}", gz.exists())
         val db = File.createTempFile("ecdict", ".db").apply { deleteOnExit() }
         GZIPInputStream(gz.inputStream()).use { input -> db.outputStream().use { input.copyTo(it) } }
