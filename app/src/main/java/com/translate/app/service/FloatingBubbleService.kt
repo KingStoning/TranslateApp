@@ -274,7 +274,9 @@ class FloatingBubbleService : Service() {
 
     /**
      * 获取要翻译的文本（异步回调，始终在主线程回调）。
-     * 优先从无障碍服务获取选中文本，其次读剪贴板。
+     * 1. 无障碍服务捕获的选中文本
+     * 2. 浏览器等拿不到选中文本的应用：自动点击选中工具栏里的「复制」，再读剪贴板
+     * 3. 剪贴板（用户自己复制的内容）
      */
     private fun resolveTranslateText(callback: (String?) -> Unit) {
         // 1) 无障碍服务捕获的选中文本
@@ -286,14 +288,23 @@ class FloatingBubbleService : Service() {
             }
         } catch (_: Exception) { /* 忽略 */ }
 
-        // 2) 剪贴板：App 在前台 / Android 9 及以下可以直接读到
+        // 2) 浏览器 / 网页：选中后工具栏还在时，替用户点「复制」，稍等剪贴板更新后读取
+        if (TranslateAccessibilityService.copySelectionViaToolbar()) {
+            Handler(Looper.getMainLooper()).postDelayed(
+                { readClipboardWithFocus(callback) },
+                COPY_SETTLE_MS
+            )
+            return
+        }
+
+        // 3) 剪贴板：App 在前台 / Android 9 及以下可以直接读到
         val direct = readClipboard()
         if (!direct.isNullOrBlank()) {
             callback(direct)
             return
         }
 
-        // 3) 后台读不到：临时获取窗口焦点后再读
+        // 后台读不到：临时获取窗口焦点后再读
         readClipboardWithFocus(callback)
     }
 
@@ -417,6 +428,8 @@ class FloatingBubbleService : Service() {
 
     companion object {
         private const val TAG = "FloatingBubble"
+        /** 点击「复制」后等待剪贴板写入的时间 */
+        private const val COPY_SETTLE_MS = 250L
         private const val NOTIFICATION_ID = 1002
 
         fun start(context: Context) {

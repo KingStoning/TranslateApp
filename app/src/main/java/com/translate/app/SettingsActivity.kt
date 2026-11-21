@@ -290,7 +290,7 @@ private fun SettingsScreen(
                 icon = Icons.Default.Accessibility,
                 title = "无障碍服务（推荐）",
                 summary = (if (accessibilityOn) "已开启 ✓\n" else "未开启 — ") +
-                        "开启后选中文字即可翻译，无需复制\n点击前往系统无障碍设置开启「划词翻译」",
+                        "开启后选中文字即可翻译，无需复制（浏览器里选中后点悬浮球，会自动替你点「复制」）\n点击前往系统无障碍设置开启「划词翻译」",
                 onClick = {
                     val intent = Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)
                     context.startActivity(intent)

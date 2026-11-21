@@ -11,7 +11,9 @@ import android.os.Looper
 import android.util.Log
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
+import android.view.accessibility.AccessibilityWindowInfo
 import com.translate.app.data.settings.AutoTranslate
+import com.translate.app.data.settings.CopyButton
 import com.translate.app.ui.overlay.OverlayTranslationWindow
 
 /**
@@ -21,6 +23,8 @@ import com.translate.app.ui.overlay.OverlayTranslationWindow
  *    如果是英文，直接弹出翻译卡片 —— 不需要复制，也不需要点悬浮球。
  *    卡片使用 TYPE_ACCESSIBILITY_OVERLAY，不需要「显示在其他应用上层」权限。
  * 2. 记录最近选中的文字，点击悬浮球时优先翻译它（无需复制）。
+ * 3. 浏览器等不发选中事件的应用：点击悬浮球时，自动点击选中文字工具栏里的「复制」
+ *    （[clickCopyInSelectionToolbar]），悬浮球再读剪贴板翻译 —— 同样省掉手动复制。
  *
  * 用户需要先在 系统设置 → 无障碍 → 已安装的应用 → 划词翻译 中开启此服务。
  *
@@ -58,6 +62,7 @@ class TranslateAccessibilityService : AccessibilityService() {
             when (event.eventType) {
                 AccessibilityEvent.TYPE_VIEW_TEXT_SELECTION_CHANGED -> {
                     val selected = captureSelectedText(event)
+                    if (selected != null) lastSelectedPackage = event.packageName
                     handleAutoTranslate(event, selected)
                 }
                 AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED -> {
@@ -65,8 +70,14 @@ class TranslateAccessibilityService : AccessibilityService() {
                     if (lastSelectedText == null) captureSelectedText(event)
                 }
                 AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED -> {
-                    // 切换到其他应用：关闭卡片
                     val pkg = event.packageName
+                    // 切换到其他应用：之前缓存的选中文字作废，避免点悬浮球翻译到别的应用里选中的内容
+                    if (pkg != null && pkg != packageName && lastSelectedPackage != null &&
+                        pkg != lastSelectedPackage
+                    ) {
+                        clearSelection()
+                    }
+                    // 切换到其他应用：关闭卡片
                     if (overlay?.isShowing == true && pkg != null && pkg != packageName &&
                         overlayPackage != null && pkg != overlayPackage
                     ) {
@@ -226,6 +237,7 @@ class TranslateAccessibilityService : AccessibilityService() {
     private fun clearSelection() {
         lastSelectedText = null
         lastSelectedAt = 0L
+        lastSelectedPackage = null
     }
 
     /**
@@ -250,6 +262,83 @@ class TranslateAccessibilityService : AccessibilityService() {
         }
 
         return null
+    }
+
+    // ========================================================================
+    //  自动点击「复制」（浏览器等不发选中事件的应用）
+    // ========================================================================
+
+    /**
+     * 在屏幕上找到「选中文字工具栏」里的「复制」按钮并点击它。
+     *
+     * 浏览器（Chrome / WebView 网页、公众号文章等）选中文字时不发无障碍选中事件，
+     * 拿不到选中的内容；但选中后弹出的工具栏（复制 / 全选 / 分享…）是一个独立的小窗口，
+     * 点一下里面的「复制」，选中的文字就进了剪贴板。
+     *
+     * 为避免误点网页正文里的「复制 / Copy」按钮（如代码块的 Copy），
+     * 只在小窗口里找（工具栏窗口），跳过占屏幕一半以上的主窗口、输入法和本应用窗口。
+     *
+     * @return 找到并点击成功返回 true
+     */
+    fun clickCopyInSelectionToolbar(): Boolean {
+        val dm = resources.displayMetrics
+        val screenArea = dm.widthPixels.toLong() * dm.heightPixels
+        val candidates = try {
+            windows.sortedByDescending { it.layer } // 最上层的窗口优先
+        } catch (e: Exception) {
+            Log.w(TAG, "获取窗口列表失败", e)
+            return false
+        }
+        val bounds = Rect()
+        for (w in candidates) {
+            if (w.type == AccessibilityWindowInfo.TYPE_INPUT_METHOD ||
+                w.type == AccessibilityWindowInfo.TYPE_ACCESSIBILITY_OVERLAY
+            ) continue
+            w.getBoundsInScreen(bounds)
+            val area = bounds.width().toLong() * bounds.height()
+            if (area <= 0 || area * 2 > screenArea) continue
+            val root = w.root ?: continue
+            if (root.packageName == packageName) continue
+            val copy = findCopyButton(root) ?: continue
+            if (clickNodeOrAncestor(copy)) {
+                Log.d(TAG, "已点击「复制」：${root.packageName}")
+                return true
+            }
+        }
+        return false
+    }
+
+    /** 广度优先查找「复制」按钮（最多检查 300 个节点） */
+    private fun findCopyButton(root: AccessibilityNodeInfo): AccessibilityNodeInfo? {
+        val queue = ArrayDeque<AccessibilityNodeInfo>()
+        queue.add(root)
+        var visited = 0
+        while (queue.isNotEmpty() && visited < 300) {
+            val node = queue.removeFirst()
+            visited++
+            if (CopyButton.matches(
+                    node.text?.toString(),
+                    node.contentDescription?.toString(),
+                    node.viewIdResourceName
+                ) && node.isVisibleToUser
+            ) return node
+            for (i in 0 until node.childCount) node.getChild(i)?.let { queue.add(it) }
+        }
+        return null
+    }
+
+    /** 按钮文字所在节点不一定可点击，向上找最多 3 层可点击的父节点 */
+    private fun clickNodeOrAncestor(node: AccessibilityNodeInfo): Boolean {
+        var n: AccessibilityNodeInfo? = node
+        var level = 0
+        while (n != null && level <= 3) {
+            if (n.isClickable && n.isEnabled) {
+                return n.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+            }
+            n = n.parent
+            level++
+        }
+        return false
     }
 
     /**
@@ -277,11 +366,37 @@ class TranslateAccessibilityService : AccessibilityService() {
         @Volatile
         private var lastSelectedAt = 0L
 
+        /** 选中文字所在的应用 */
+        @Volatile
+        private var lastSelectedPackage: CharSequence? = null
+
         @Volatile
         private var instance: TranslateAccessibilityService? = null
 
         /** 无障碍服务是否正在运行 */
         val isRunning: Boolean get() = instance != null
+
+        /**
+         * 点击选中文字工具栏里的「复制」（需在主线程调用）。
+         * 无障碍服务未开启或找不到按钮时返回 false。
+         */
+        fun copySelectionViaToolbar(): Boolean = try {
+            instance?.clickCopyInSelectionToolbar() ?: false
+        } catch (e: Exception) {
+            Log.w(TAG, "自动点击复制失败", e)
+            false
+        }
+
+        /** 缓存的选中文字是否来自当前前台应用（拿不到前台应用时视为是） */
+        private fun isSameAppAsActiveWindow(): Boolean {
+            val selectedPkg = lastSelectedPackage ?: return true
+            val activePkg = try {
+                instance?.rootInActiveWindow?.packageName
+            } catch (_: Exception) {
+                null
+            } ?: return true
+            return activePkg == selectedPkg
+        }
 
         /**
          * 获取当前选中的文本
@@ -290,7 +405,8 @@ class TranslateAccessibilityService : AccessibilityService() {
         fun getSelectedText(): String? {
             val cached = lastSelectedText
             if (!cached.isNullOrBlank() &&
-                System.currentTimeMillis() - lastSelectedAt < SELECTION_TTL_MS
+                System.currentTimeMillis() - lastSelectedAt < SELECTION_TTL_MS &&
+                isSameAppAsActiveWindow()
             ) return cached
 
             return try {
