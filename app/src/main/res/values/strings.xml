@@ -36,5 +36,5 @@
     <string name="german">德语</string>
     <string name="russian">俄语</string>
     <string name="spanish">西班牙语</string>
-    <string name="accessibility_service_desc">监听文本选中事件，让划词翻译悬浮球能够获取您选中的文字进行翻译</string>
+    <string name="accessibility_service_desc">监听文本选中事件：选中英文后自动弹出翻译，或点击悬浮球翻译选中的文字，无需复制。仅读取您选中的文字，不收集其他内容。</string>
 </resources>

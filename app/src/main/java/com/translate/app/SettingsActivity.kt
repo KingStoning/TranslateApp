@@ -19,6 +19,7 @@ import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.TouchApp
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.Accessibility
+import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.Save
 import androidx.compose.material3.*
@@ -29,6 +30,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import com.translate.app.data.CredentialManager
+import com.translate.app.data.settings.AutoTranslate
+import com.translate.app.service.TranslateAccessibilityService
 import com.translate.app.service.FloatingBubbleService
 import com.translate.app.ui.theme.TranslateAppTheme
 
@@ -79,6 +82,8 @@ private fun SettingsScreen(
     var bubbleEnabled by remember {
         mutableStateOf(prefs.getBoolean("bubble_enabled", false))
     }
+    var autoTranslateEnabled by remember { mutableStateOf(AutoTranslate.isEnabled(context)) }
+    var accessibilityOn by remember { mutableStateOf(isAccessibilityServiceOn(context)) }
     var overlayPermissionGranted by remember {
         mutableStateOf(
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
@@ -97,6 +102,7 @@ private fun SettingsScreen(
             if (granted != overlayPermissionGranted) {
                 overlayPermissionGranted = granted
             }
+            accessibilityOn = isAccessibilityServiceOn(context)
         }
     }
 
@@ -283,10 +289,26 @@ private fun SettingsScreen(
             SettingsClickItem(
                 icon = Icons.Default.Accessibility,
                 title = "无障碍服务（推荐）",
-                summary = "开启后可直接捕获选中的文本，无需手动复制\n点击前往系统无障碍设置开启「划词翻译」",
+                summary = (if (accessibilityOn) "已开启 ✓\n" else "未开启 — ") +
+                        "开启后选中文字即可翻译，无需复制\n点击前往系统无障碍设置开启「划词翻译」",
                 onClick = {
                     val intent = Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)
                     context.startActivity(intent)
+                }
+            )
+
+            // 选中英文自动翻译
+            SettingsSwitchItem(
+                icon = Icons.Default.AutoAwesome,
+                title = "选中英文自动翻译",
+                summary = if (accessibilityOn)
+                    "选中英文后自动弹出翻译，不用复制、不用点悬浮球（输入框内选中不弹出）"
+                else
+                    "需要先开启上面的无障碍服务",
+                checked = autoTranslateEnabled,
+                onCheckedChange = { enabled ->
+                    autoTranslateEnabled = enabled
+                    AutoTranslate.setEnabled(context, enabled)
                 }
             )
 
@@ -436,5 +458,17 @@ private fun SettingsClickItem(
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
         }
+    }
+}
+
+/** 系统设置里是否已开启本应用的无障碍服务 */
+private fun isAccessibilityServiceOn(context: Context): Boolean {
+    if (TranslateAccessibilityService.isRunning) return true
+    val enabled = Settings.Secure.getString(
+        context.contentResolver, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
+    ) ?: return false
+    val component = android.content.ComponentName(context, TranslateAccessibilityService::class.java)
+    return enabled.split(':').any {
+        android.content.ComponentName.unflattenFromString(it) == component
     }
 }
