@@ -40,14 +40,22 @@ import com.translate.app.ui.theme.TranslateAppTheme
  * 会让 startActivity 被静默拦截 —— 表现就是点悬浮球没反应。
  * 悬浮窗只依赖已经授予的「显示在其他应用上层」权限，后台也能弹出。
  *
- * 窗口不抢焦点、只占顶部卡片区域，点卡片外任意位置（ACTION_OUTSIDE）或按 ✕ 关闭，
+ * 窗口不抢焦点、只占顶部（或底部）卡片区域，点卡片外任意位置（ACTION_OUTSIDE）或按 ✕ 关闭，
  * 不影响下面的 App 继续操作。
+ *
+ * @param accessibilityOverlay true 时由无障碍服务显示（TYPE_ACCESSIBILITY_OVERLAY）：
+ *   不需要「显示在其他应用上层」权限，但 context 必须是 AccessibilityService 本身，
+ *   WindowManager 也必须从它获取（窗口要挂在无障碍服务的 token 上）。
  */
-class OverlayTranslationWindow(context: Context) {
+class OverlayTranslationWindow(
+    context: Context,
+    private val accessibilityOverlay: Boolean = false
+) {
 
     private val appContext = context.applicationContext
     private val windowManager =
-        appContext.getSystemService(Context.WINDOW_SERVICE) as WindowManager
+        (if (accessibilityOverlay) context else appContext)
+            .getSystemService(Context.WINDOW_SERVICE) as WindowManager
 
     private var root: FrameLayout? = null
     private var owner: OverlayOwner? = null
@@ -57,11 +65,21 @@ class OverlayTranslationWindow(context: Context) {
 
     /**
      * 显示（或刷新）翻译悬浮窗。
+     * @param atBottom true 时卡片显示在屏幕底部（选中的文字在屏幕上半部分时，避免挡住它）
      * @throws Exception 添加窗口失败（如没有悬浮窗权限）时抛出，调用方可降级处理
      */
-    fun show(text: String) {
+    fun show(text: String, atBottom: Boolean = false) {
         currentText = text
-        if (root != null) return  // 已显示：只刷新文本，卡片内部会重新翻译
+        root?.let { v ->
+            // 已显示：只刷新文本（卡片内部会重新翻译），必要时换位置
+            val lp = v.layoutParams as? WindowManager.LayoutParams ?: return
+            val gravity = gravityFor(atBottom)
+            if (lp.gravity != gravity) {
+                lp.gravity = gravity
+                try { windowManager.updateViewLayout(v, lp) } catch (_: Exception) {}
+            }
+            return
+        }
 
         val lifecycleOwner = OverlayOwner().also { it.start() }
 
@@ -96,16 +114,18 @@ class OverlayTranslationWindow(context: Context) {
         val params = WindowManager.LayoutParams(
             WindowManager.LayoutParams.MATCH_PARENT,
             WindowManager.LayoutParams.WRAP_CONTENT,
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
-                WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
-            else
-                @Suppress("DEPRECATION") WindowManager.LayoutParams.TYPE_PHONE,
+            when {
+                accessibilityOverlay -> WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY
+                Build.VERSION.SDK_INT >= Build.VERSION_CODES.O ->
+                    WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+                else -> @Suppress("DEPRECATION") WindowManager.LayoutParams.TYPE_PHONE
+            },
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
                     WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH or
                     WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
             PixelFormat.TRANSLUCENT
         ).apply {
-            gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
+            gravity = gravityFor(atBottom)
             y = (40 * appContext.resources.displayMetrics.density).toInt()
         }
 
@@ -118,6 +138,9 @@ class OverlayTranslationWindow(context: Context) {
         root = container
         owner = lifecycleOwner
     }
+
+    private fun gravityFor(atBottom: Boolean) =
+        (if (atBottom) Gravity.BOTTOM else Gravity.TOP) or Gravity.CENTER_HORIZONTAL
 
     fun dismiss() {
         val v = root ?: return
