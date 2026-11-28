@@ -6,6 +6,7 @@ import android.app.NotificationManager
 import android.os.Build
 import com.translate.app.data.dict.OfflineDict
 import com.translate.app.data.history.HistoryRepository
+import com.translate.app.service.AccessibilityEnabler
 
 class App : Application() {
 
@@ -21,6 +22,8 @@ class App : Application() {
         HistoryRepository.init(this)
         OfflineDict.init(this)
         OfflineDict.warmUp()
+        // 任何原因拉起进程时（开机、快捷开关、打开 App…），有授权就把无障碍服务开回来
+        AccessibilityEnabler.ensureEnabled(this)
         createNotificationChannels()
     }
 

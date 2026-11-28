@@ -27,4 +27,15 @@ class CopyButtonTest {
         assertFalse(CopyButton.matches(null, null, "com.example:id/copyright"))
         assertFalse(CopyButton.matches(null, null, null))
     }
+
+    @Test
+    fun recognisesSelectionMenusByTheirOtherItems() {
+        // 微信聊天长按菜单 / 系统选中工具栏
+        assertTrue(CopyButton.countMenuSiblings(listOf("复制", "转发", "收藏", "删除")) >= 1)
+        assertTrue(CopyButton.countMenuSiblings(listOf("Copy", "Share", "Select all", null)) >= 1)
+        // 网页代码块旁的 Copy 按钮：周围只有代码、没有菜单项
+        assertTrue(CopyButton.countMenuSiblings(listOf("Copy", "val x = 1", "println(x)", "Kotlin")) == 0)
+        // 「复制」本身不算
+        assertTrue(CopyButton.countMenuSiblings(listOf("复制", "copy", "COPY")) == 0)
+    }
 }

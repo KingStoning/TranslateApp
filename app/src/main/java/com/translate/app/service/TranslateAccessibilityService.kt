@@ -26,7 +26,11 @@ import com.translate.app.ui.overlay.OverlayTranslationWindow
  * 3. 浏览器等不发选中事件的应用：点击悬浮球时，自动点击选中文字工具栏里的「复制」
  *    （[clickCopyInSelectionToolbar]），悬浮球再读剪贴板翻译 —— 同样省掉手动复制。
  *
- * 用户需要先在 系统设置 → 无障碍 → 已安装的应用 → 划词翻译 中开启此服务。
+ * 4. 显示悬浮球（[BubbleController]）：无障碍服务由系统保活、被杀后自动重新绑定，
+ *    所以由它显示的悬浮球会一直都在，不需要悬浮窗权限，也没有常驻通知。
+ *
+ * 用户需要先在 系统设置 → 无障碍 → 已安装的应用 → 划词翻译 中开启此服务
+ * （或用 ADB 授权后由 [AccessibilityEnabler] 自动开启）。
  *
  * 局限：依赖应用发出的无障碍选中事件。原生文本控件都会发；
  * 部分自绘界面 / 网页内容不发，这时仍可用「复制 + 悬浮球」或系统菜单里的「翻译」。
@@ -35,6 +39,9 @@ class TranslateAccessibilityService : AccessibilityService() {
 
     private val handler = Handler(Looper.getMainLooper())
     private var overlay: OverlayTranslationWindow? = null
+    private var bubble: BubbleController? = null
+
+    val isBubbleShowing: Boolean get() = bubble?.isShowing == true
     private var pendingAuto: Runnable? = null
 
     /** 已自动弹出过的选中内容；选区清空后重置，避免同一选区反复弹出 */
@@ -55,6 +62,18 @@ class TranslateAccessibilityService : AccessibilityService() {
         }
         serviceInfo = config
         instance = this
+        // 无障碍服务接管悬浮球（开机、被杀后重新绑定时都会走到这里，悬浮球自动恢复）
+        BubbleManager.ensureRunning(this)
+    }
+
+    /** 显示悬浮球（由 [BubbleManager] 调用），成功返回 true */
+    fun showBubble(): Boolean {
+        val b = bubble ?: BubbleController(this, accessibilityOverlay = true).also { bubble = it }
+        return b.show()
+    }
+
+    fun hideBubble() {
+        bubble?.hide()
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent) {
@@ -95,7 +114,11 @@ class TranslateAccessibilityService : AccessibilityService() {
     override fun onDestroy() {
         cancelPending()
         dismissOverlay()
+        bubble?.hide()
+        bubble = null
         if (instance === this) instance = null
+        // 无障碍被关闭：尝试交给前台服务继续显示悬浮球（有悬浮窗权限时）
+        BubbleManager.ensureRunning(applicationContext)
         super.onDestroy()
     }
 
@@ -290,41 +313,102 @@ class TranslateAccessibilityService : AccessibilityService() {
             return false
         }
         val bounds = Rect()
+        val large = mutableListOf<AccessibilityNodeInfo>()
+
+        // 第 1 轮：小窗口（系统 / 浏览器的浮动工具栏都是独立小窗口）
         for (w in candidates) {
             if (w.type == AccessibilityWindowInfo.TYPE_INPUT_METHOD ||
                 w.type == AccessibilityWindowInfo.TYPE_ACCESSIBILITY_OVERLAY
             ) continue
             w.getBoundsInScreen(bounds)
             val area = bounds.width().toLong() * bounds.height()
-            if (area <= 0 || area * 2 > screenArea) continue
+            if (area <= 0) continue
             val root = w.root ?: continue
             if (root.packageName == packageName) continue
-            val copy = findCopyButton(root) ?: continue
+            if (area * 2 > screenArea) {
+                large += root
+                continue
+            }
+            val copy = findCopyButton(root, requireMenuSiblings = false) ?: continue
             if (clickNodeOrAncestor(copy)) {
                 Log.d(TAG, "已点击「复制」：${root.packageName}")
                 return true
             }
         }
+
+        // 第 2 轮：全屏窗口（部分 App 的长按菜单是全屏弹窗，如聊天气泡菜单）。
+        // 为避免点到网页 / 正文里的「复制」按钮，要求旁边还有「全选 / 分享 / 转发…」等菜单项
+        for (root in large) {
+            val copy = findCopyButton(root, requireMenuSiblings = true) ?: continue
+            if (clickNodeOrAncestor(copy)) {
+                Log.d(TAG, "已点击菜单中的「复制」：${root.packageName}")
+                return true
+            }
+        }
+
+        // 第 3 轮：没有工具栏时，请当前输入焦点所在的控件自己执行「复制」（仅限声明支持复制的控件）
+        try {
+            val focused = rootInActiveWindow?.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
+            if (focused != null && focused.packageName != packageName &&
+                focused.actionList.any { it.id == AccessibilityNodeInfo.ACTION_COPY } &&
+                focused.performAction(AccessibilityNodeInfo.ACTION_COPY)
+            ) {
+                Log.d(TAG, "已通过 ACTION_COPY 复制：${focused.packageName}")
+                return true
+            }
+        } catch (_: Exception) { }
         return false
     }
 
-    /** 广度优先查找「复制」按钮（最多检查 300 个节点） */
-    private fun findCopyButton(root: AccessibilityNodeInfo): AccessibilityNodeInfo? {
+    /**
+     * 广度优先查找「复制」按钮。
+     * @param requireMenuSiblings 为 true 时，按钮附近（3 层父节点内）还必须有其他菜单项
+     */
+    private fun findCopyButton(
+        root: AccessibilityNodeInfo,
+        requireMenuSiblings: Boolean
+    ): AccessibilityNodeInfo? {
+        val limit = if (requireMenuSiblings) 1500 else 300
         val queue = ArrayDeque<AccessibilityNodeInfo>()
         queue.add(root)
         var visited = 0
-        while (queue.isNotEmpty() && visited < 300) {
+        while (queue.isNotEmpty() && visited < limit) {
             val node = queue.removeFirst()
             visited++
             if (CopyButton.matches(
                     node.text?.toString(),
                     node.contentDescription?.toString(),
                     node.viewIdResourceName
-                ) && node.isVisibleToUser
+                ) && node.isVisibleToUser &&
+                (!requireMenuSiblings || hasMenuSiblings(node))
             ) return node
             for (i in 0 until node.childCount) node.getChild(i)?.let { queue.add(it) }
         }
         return null
+    }
+
+    /** 「复制」按钮附近是否还有其他选中菜单项（全选 / 分享 / 转发…），用来识别全屏弹窗里的菜单 */
+    private fun hasMenuSiblings(copy: AccessibilityNodeInfo): Boolean {
+        var container: AccessibilityNodeInfo? = copy.parent
+        var level = 0
+        while (container != null && level < 3) {
+            val labels = mutableListOf<String?>()
+            collectLabels(container, labels, budget = intArrayOf(40))
+            if (CopyButton.countMenuSiblings(labels) >= 1) return true
+            container = container.parent
+            level++
+        }
+        return false
+    }
+
+    private fun collectLabels(node: AccessibilityNodeInfo, out: MutableList<String?>, budget: IntArray) {
+        if (budget[0]-- <= 0) return
+        out += node.text?.toString()
+        out += node.contentDescription?.toString()
+        for (i in 0 until node.childCount) {
+            node.getChild(i)?.let { collectLabels(it, out, budget) }
+            if (budget[0] <= 0) return
+        }
     }
 
     /** 按钮文字所在节点不一定可点击，向上找最多 3 层可点击的父节点 */
@@ -345,8 +429,21 @@ class TranslateAccessibilityService : AccessibilityService() {
      * 主动获取当前选中文本（由外部调用）
      */
     fun fetchCurrentSelectedText(): String? {
-        val root = rootInActiveWindow ?: return null
-        return extractSelectedTextFromNode(root)
+        rootInActiveWindow?.let { root ->
+            if (root.packageName != packageName) {
+                extractSelectedTextFromNode(root)?.let { return it }
+            }
+        }
+        // 当前活动窗口里没有：检查屏幕上的其他应用窗口（分屏、小窗、弹窗等）
+        return try {
+            windows.sortedByDescending { it.layer }.firstNotNullOfOrNull { w ->
+                if (w.type != AccessibilityWindowInfo.TYPE_APPLICATION) return@firstNotNullOfOrNull null
+                val root = w.root ?: return@firstNotNullOfOrNull null
+                if (root.packageName == packageName) null else extractSelectedTextFromNode(root)
+            }
+        } catch (_: Exception) {
+            null
+        }
     }
 
     companion object {
@@ -371,7 +468,8 @@ class TranslateAccessibilityService : AccessibilityService() {
         private var lastSelectedPackage: CharSequence? = null
 
         @Volatile
-        private var instance: TranslateAccessibilityService? = null
+        var instance: TranslateAccessibilityService? = null
+            private set
 
         /** 无障碍服务是否正在运行 */
         val isRunning: Boolean get() = instance != null

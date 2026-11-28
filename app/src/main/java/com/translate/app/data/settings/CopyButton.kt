@@ -16,6 +16,21 @@ object CopyButton {
         return isLabel(text) || isLabel(contentDescription)
     }
 
+    /** 选中菜单里常和「复制」一起出现的其他按钮 */
+    private val MENU_SIBLINGS = setOf(
+        "全选", "剪切", "粘贴", "分享", "搜索", "翻译", "查找", "转发", "收藏", "删除",
+        "多选", "引用", "提醒", "搜一搜", "网页搜索", "朗读", "更多",
+        "select all", "cut", "paste", "share", "search", "web search", "translate",
+        "look up", "more", "forward", "delete", "reply", "quote"
+    )
+
+    /** 统计一组按钮文字里有几个是「其他菜单项」（不含复制本身） */
+    fun countMenuSiblings(labels: List<String?>): Int =
+        labels.mapNotNull { it?.trim()?.lowercase() }
+            .filter { it in MENU_SIBLINGS }
+            .distinct()
+            .size
+
     private fun isLabel(s: String?): Boolean {
         val t = s?.trim()?.lowercase() ?: return false
         return t in LABELS

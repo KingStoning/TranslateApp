@@ -17,6 +17,8 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.ui.Modifier
 import androidx.core.content.ContextCompat
 import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
+import com.translate.app.service.AccessibilityEnabler
+import com.translate.app.service.BubbleManager
 import com.translate.app.ui.main.MainScreen
 import com.translate.app.ui.theme.TranslateAppTheme
 
@@ -56,6 +58,17 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        // 每次打开 App：恢复无障碍服务（有 ADB 授权时）和悬浮球
+        AccessibilityEnabler.ensureEnabled(this)
+        BubbleManager.ensureRunning(this)
+        // 设置里显示已开启但服务没在运行（被系统杀掉后卡住）：稍等后重新开启一次
+        window.decorView.postDelayed({
+            if (!isFinishing) AccessibilityEnabler.ensureEnabled(this, restartIfStuck = true)
+        }, 2000)
     }
 
     /**

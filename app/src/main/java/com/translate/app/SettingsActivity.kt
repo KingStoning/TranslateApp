@@ -20,6 +20,10 @@ import androidx.compose.material.icons.filled.TouchApp
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.Accessibility
 import androidx.compose.material.icons.filled.AutoAwesome
+import androidx.compose.material.icons.filled.BatteryChargingFull
+import androidx.compose.material.icons.filled.ContentCopy
+import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Terminal
 import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.Save
 import androidx.compose.material3.*
@@ -31,8 +35,9 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import com.translate.app.data.CredentialManager
 import com.translate.app.data.settings.AutoTranslate
+import com.translate.app.service.AccessibilityEnabler
+import com.translate.app.service.BubbleManager
 import com.translate.app.service.TranslateAccessibilityService
-import com.translate.app.service.FloatingBubbleService
 import com.translate.app.ui.theme.TranslateAppTheme
 
 class SettingsActivity : ComponentActivity() {
@@ -84,6 +89,9 @@ private fun SettingsScreen(
     }
     var autoTranslateEnabled by remember { mutableStateOf(AutoTranslate.isEnabled(context)) }
     var accessibilityOn by remember { mutableStateOf(isAccessibilityServiceOn(context)) }
+    var autoEnablePermission by remember { mutableStateOf(AccessibilityEnabler.hasPermission(context)) }
+    var autoKeepOn by remember { mutableStateOf(AccessibilityEnabler.isAutoEnableOn(context)) }
+    var ignoringBattery by remember { mutableStateOf(isIgnoringBatteryOptimizations(context)) }
     var overlayPermissionGranted by remember {
         mutableStateOf(
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
@@ -103,6 +111,8 @@ private fun SettingsScreen(
                 overlayPermissionGranted = granted
             }
             accessibilityOn = isAccessibilityServiceOn(context)
+            autoEnablePermission = AccessibilityEnabler.hasPermission(context)
+            ignoringBattery = isIgnoringBatteryOptimizations(context)
         }
     }
 
@@ -255,17 +265,16 @@ private fun SettingsScreen(
             SettingsSwitchItem(
                 icon = Icons.Default.TouchApp,
                 title = "显示悬浮球",
-                summary = "在屏幕上显示可拖动的翻译悬浮球",
+                summary = when {
+                    accessibilityOn -> "由无障碍服务显示：常驻、被清理后自动恢复，无常驻通知"
+                    overlayPermissionGranted -> "开启无障碍服务后悬浮球会更稳定（不会随 App 被清理而消失）"
+                    else -> "需要悬浮窗权限或无障碍服务"
+                },
                 checked = bubbleEnabled,
-                enabled = overlayPermissionGranted,
+                enabled = overlayPermissionGranted || accessibilityOn,
                 onCheckedChange = { enabled ->
                     bubbleEnabled = enabled
-                    prefs.edit().putBoolean("bubble_enabled", enabled).apply()
-                    if (enabled) {
-                        FloatingBubbleService.start(context)
-                    } else {
-                        FloatingBubbleService.stop(context)
-                    }
+                    BubbleManager.setEnabled(context, enabled)
                 }
             )
 
@@ -310,6 +319,45 @@ private fun SettingsScreen(
                     autoTranslateEnabled = enabled
                     AutoTranslate.setEnabled(context, enabled)
                 }
+            )
+
+            HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
+
+            // 自动开启无障碍（需要 ADB 授权一次）
+            AutoEnableAccessibilityItem(
+                granted = autoEnablePermission,
+                keepOn = autoKeepOn,
+                command = AccessibilityEnabler.adbCommand(context),
+                onCopy = { copyText(context, it) },
+                onKeepOnChange = { on ->
+                    autoKeepOn = on
+                    AccessibilityEnabler.setAutoEnable(context, on)
+                    if (on) AccessibilityEnabler.ensureEnabled(context)
+                },
+                onEnableNow = {
+                    AccessibilityEnabler.ensureEnabled(context, restartIfStuck = true, force = true)
+                    accessibilityOn = isAccessibilityServiceOn(context)
+                }
+            )
+
+            HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
+
+            // 防止被系统清理
+            SettingsClickItem(
+                icon = Icons.Default.BatteryChargingFull,
+                title = "关闭电池优化",
+                summary = if (ignoringBattery) "已关闭 ✓（系统不会因省电而停止悬浮球）"
+                          else "未关闭 — 点击允许后台运行，减少悬浮球 / 无障碍被系统停止",
+                onClick = {
+                    if (!ignoringBattery) requestIgnoreBatteryOptimizations(context)
+                }
+            )
+            SettingsClickItem(
+                icon = Icons.Default.Settings,
+                title = "自启动与后台运行",
+                summary = "一加 / OPPO：应用信息 → 耗电管理 → 允许后台行为、允许自启动；" +
+                        "并在最近任务里下拉卡片「锁定」本应用，避免一键清理时被强行停止",
+                onClick = { openAppDetails(context) }
             )
 
             HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
@@ -471,4 +519,135 @@ private fun isAccessibilityServiceOn(context: Context): Boolean {
     return enabled.split(':').any {
         android.content.ComponentName.unflattenFromString(it) == component
     }
+}
+
+/**
+ * 「自动开启无障碍」：安卓不允许 App 自己打开无障碍服务，
+ * 需要用电脑执行一次 ADB 命令授予 WRITE_SECURE_SETTINGS 权限。
+ */
+@Composable
+private fun AutoEnableAccessibilityItem(
+    granted: Boolean,
+    keepOn: Boolean,
+    command: String,
+    onCopy: (String) -> Unit,
+    onKeepOnChange: (Boolean) -> Unit,
+    onEnableNow: () -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 8.dp),
+        verticalAlignment = Alignment.Top
+    ) {
+        Icon(
+            Icons.Default.Terminal,
+            contentDescription = null,
+            tint = MaterialTheme.colorScheme.primary,
+            modifier = Modifier.size(24.dp)
+        )
+        Spacer(modifier = Modifier.width(16.dp))
+        Column(modifier = Modifier.weight(1f)) {
+            Text("自动开启无障碍", style = MaterialTheme.typography.titleMedium)
+            if (granted) {
+                Text(
+                    "已授权 ✓ 开机、更新、被系统关闭后 App 再次启动时，都会自动把无障碍服务开回来。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        "自动保持开启",
+                        style = MaterialTheme.typography.bodyMedium,
+                        modifier = Modifier.weight(1f)
+                    )
+                    Switch(checked = keepOn, onCheckedChange = onKeepOnChange)
+                }
+                if (!keepOn) {
+                    Text(
+                        "已关闭：手动关掉无障碍后不会被自动打开。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.outline
+                    )
+                }
+                TextButton(onClick = onEnableNow, contentPadding = PaddingValues(0.dp)) {
+                    Text("立即开启 / 重新开启")
+                }
+            } else {
+                Text(
+                    "安卓不允许 App 自己打开无障碍。用电脑授权一次后即可自动开启（只需做一次，卸载后需重做）：\n" +
+                            "1. 手机开启「开发者选项 → USB 调试」并连接电脑\n" +
+                            "2. 在电脑上执行下面的命令",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Surface(
+                    shape = MaterialTheme.shapes.small,
+                    color = MaterialTheme.colorScheme.surfaceVariant,
+                    modifier = Modifier
+                        .padding(top = 6.dp)
+                        .fillMaxWidth()
+                        .clickable { onCopy(command) }
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.padding(8.dp)
+                    ) {
+                        Text(
+                            command,
+                            style = MaterialTheme.typography.bodySmall.copy(
+                                fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
+                            ),
+                            modifier = Modifier.weight(1f)
+                        )
+                        Icon(
+                            Icons.Default.ContentCopy,
+                            contentDescription = "复制命令",
+                            modifier = Modifier.size(18.dp)
+                        )
+                    }
+                }
+                Text(
+                    "不想用电脑：也可以在 系统设置 → 无障碍 中手动开启（开关是灰色时：应用信息 → 右上角 ⋮ → 允许受限制的设置）。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.outline,
+                    modifier = Modifier.padding(top = 6.dp)
+                )
+            }
+        }
+    }
+}
+
+private fun copyText(context: Context, text: String) {
+    val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+    cm.setPrimaryClip(android.content.ClipData.newPlainText("adb", text))
+    android.widget.Toast.makeText(context, "已复制命令", android.widget.Toast.LENGTH_SHORT).show()
+}
+
+private fun isIgnoringBatteryOptimizations(context: Context): Boolean {
+    val pm = context.getSystemService(Context.POWER_SERVICE) as android.os.PowerManager
+    return pm.isIgnoringBatteryOptimizations(context.packageName)
+}
+
+@android.annotation.SuppressLint("BatteryLife")
+private fun requestIgnoreBatteryOptimizations(context: Context) {
+    try {
+        context.startActivity(
+            Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:${context.packageName}"))
+        )
+    } catch (_: Exception) {
+        try {
+            context.startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
+        } catch (_: Exception) {
+            openAppDetails(context)
+        }
+    }
+}
+
+private fun openAppDetails(context: Context) {
+    try {
+        context.startActivity(
+            Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:${context.packageName}"))
+        )
+    } catch (_: Exception) { }
 }
